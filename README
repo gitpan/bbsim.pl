@@ -1,0 +1,19 @@
+This is a script that will link together a few
+tools in linux to do circuit simulation. The
+tools are GNU Octave, and the spice-2g6 circuit
+simulator. Octave is freely available and easy
+to find. Spice was distributed with RedHat-5.2.
+You can get spice from RedHat or any mirror site
+that has old distributions. If you have problems 
+getting spice to install, try rpm --nodeps spicexxx.rpm
+this worked for me on a debian box and spice is running
+fine. You will also need to install the Term::ReadKey
+and Term::ANSIColor modules from CPAN. Other than these
+you "should" have no problems. This script is in
+its infancy so there is bound to be bugs. I have used
+it for the purposes that I will be using it for
+and it is working well. I hope it works well for
+you. Let me know.
+enjoy, 
+billy
+bbryant@cubsmvp.com

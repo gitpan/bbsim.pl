@@ -1,0 +1,1508 @@
+#!/usr/bin/perl 
+####################################################################
+#                       bbsim.pl -i <netlist>
+#  This is a perl script that links together several tools that are
+# available under the linux operating system to do circuit analysis
+# and simulation. The tools are the Perl programming language,  
+# Berkeley Spice Version 2g6, and GNU Octave.
+#  This script will either accept a complete spice deck as input
+# or will guide the user through an interactive setup for analyss
+# of a circuit. The available analysis types so far are transient,
+# ac, fourier, and operating point. 
+#  The basic instructions are to start the script. Then the user would
+# load an input deck using the load command. If the analysis 
+# parameters are not setup, then they could be set up using the 
+# setup command. THe user would then simulate the deck with the sim
+# command. After simulation the user can view the output of the analysis
+# by typing the appropriate type. For example, if a transient analysis
+# were done, the user would type tran to see the output, for ac,the user
+# would type ac, node will give all of the node voltages.  
+#  Graphical representation of the output can be done by using the plot
+# command. For example, after doing a transient analysis the user 
+# plot the output by doing 'plot tran'. At this point this will work
+# for transient, ac, and fourier. When the plot comes up, the user
+# can trace through the plot by using the cursors. Start the cursors
+# by typing cursors. The numeric keys '8', '4', '2' and '6' control
+# the movement of the cursors. Any points can be labeled by pressing
+# 'm' once the cursors are on. The label can be moved around by 
+# pressing the 'r' key. 'l' and 's' lengthen and shorten the arrow
+# length. To exit the mark, or cursors, press 'q'. The plot can be
+# saved by typing 'save'. 
+#  This is of course free software with no waranty or promises. You
+# are welcome and encouraged to make modifications as long as you
+# redistribute free of charge. Please send me a copy of any 
+# modifications you make. 
+#
+####################################################################
+
+use Getopt::Std;
+use FileHandle;
+use Term::ANSIColor qw(:constants);
+use Term::ReadLine;
+use Term::ReadKey;
+use IPC::Open2;
+use Cwd;
+
+getopts ("i:", \%args);
+
+# This is the basic form of the circuit object.
+%circuit = (
+
+    name => "",
+	deck => "",
+	dcnode => [],
+	num_nodes => "",
+	AC => {
+	   parameters => [],
+    },
+	TRAN => {
+	   parameters => [],
+	},
+	FOUR => {
+	   parameters => [],
+	},
+
+);
+
+# Clear the hash where the circuits will be stored.
+%circuits = {};
+
+# If you don't like editing with vi, change it here.
+$EDITOR = "vi";
+
+
+if ($args{i}) {load($args{i});}
+
+# Make a term object.
+$term = new Term::ReadLine 'bbsim.pl simulator';
+$OUT = $term->OUT || STDOUT;
+
+my ($command, $deck, @time, $time, @args);
+  
+do { # Sit here until quit or exit.
+
+  @time = split ' ', scalar localtime;
+  $time = @time[3];
+
+  if($circuit->{name}) {$deck = $circuit->{name};}
+  else {$deck = "NAD";}
+
+  $prompt = "$time $deck--> ";
+  $command = $term->readline($prompt);
+  $term->addhistory($command) if /\S/;
+
+  @args = split ' ', $command;
+  $command = shift @args;
+  
+  if ($command =~ /^load/i) {load(@args);}
+  elsif ($command =~ /^edit/i) {edit();}
+  elsif ($command =~ /setup/i) {setup();}
+  elsif ($command =~ /decks/i) {show_decks();}
+  elsif ($command =~ /deck/i) {show_deck();}
+  elsif ($command =~ /activate/i) {activate(@args);}
+  elsif ($command =~ /^sim/i) {simulate();}
+  elsif ($command =~ /^node/i) {show_node(@args);}
+  elsif ($command =~ /^ac/i) {show_ac(@args);}
+  elsif ($command =~ /^tran/i) {show_tran(@args);}
+  elsif ($command =~ /^four/i) {show_four(@args);}
+  elsif ($command =~ /^plot/i) {plot(@args);}
+  elsif ($command =~ /^help/i) {help(@args);}
+  elsif ($command =~ /quit|exit/i) {exit(0);} 
+  elsif ($command =~ /cd/) {chdir $args[0];}
+  elsif ($command =~ /ls/) {system "ls --color";}
+  elsif ($command =~ /pwd/) {printf"%s\n", cwd();}
+
+} while (1);
+
+############################### End of main routine.
+
+########################################################
+#                  help
+#  This sub-routine will print a brief help message and
+# return. If the user just types help, it will display
+# all of the possible commands. If the user types help
+# with one of the commands as an argument, a brief
+# message will be displayed describing the use of the
+# command.
+########################################################
+sub help {
+
+  my $arg = shift @_;
+  
+  my %help => {
+            load => "", 
+			edit => "",
+			setup => "",
+			decks => "",
+			deck => "",
+			activate => "",
+			simulate => "",
+            node => "",
+			ac => "",
+			tran => "",
+			four => "",
+			plot => "",
+			cd => "",
+			ls => "",
+			pwd => "",
+			};
+	
+
+  $help{load} = "load file1 file2 ...\nUse this to load the deck that you would like to simulate.\n";
+  $help{edit} = "edit: \nEdit the deck currently loaded.\n";
+  $help{setup} = "Setup the circuit for analysis. Follow the prompts.\n";
+  $help{decks} = "This will print out the decks that are currently loaded into memory.\n";
+  $help{deck} = "This will display the currently active deck.\n";
+  $help{activate} = "activate <deck>:\nThis will set the entered deck active.\n";
+  $help{simulate} = "This will attempt to simulate the currently active deck.\n";
+  $help{node} = "After a simulation has been done, this will show the DC node values.\n";
+  $help{ac} = "After a simulation has been done, this will show the ac values.\n";
+  $help{tran} = "After a simulation has been done, this will show the transient values.\n";
+  $help{four} = "After a simulation has been done, this will show the Fourier values.\n";
+  $help{plot} = "plot <ac|tran>\nuse this after simulation to plot the output.\nOnce inside the\
+  plot mode, type help for command list.\n";
+  $help{cd} = "Change Directory.\n";
+  $help{ls} = "list contents of current directory.\n";
+  $help{pwd} = "Print working directory.\n";
+
+  if ($arg) {print "$help{$arg}\n";}
+  else {
+    foreach $command (keys %help) {
+	  print "$command\n";
+	}
+  }
+
+  return(1);
+}
+
+########################################################
+#                       edit
+#  To edit the current deck using the editor defined
+# by the variable EDITOR. If you don't like default
+# editor which is 'vi', then change the variable
+# EDITOR at the beginning of the script.
+# This will start an editor session with the currently
+# active deck.
+########################################################
+sub edit {
+
+
+  if(! $circuit->{name}) {print "You must load a deck first.\n";}
+  else {
+    system("$EDITOR $circuit->{name}"); 
+	undef $/;
+	open DECK, "< $circuit->{name}" || die "Unable to reload $circuit->{name}: $!";
+	$circuit->{deck} = <DECK>;
+	$/ = "\n";
+  }
+  return(1);
+
+}
+
+
+
+######################################################
+#                       setup
+#  Interactively setup the analysis requests.
+# This will guide you through the setup process for
+# the spice deck you are working on. Don't want to say
+# too much here because this is going to change.
+######################################################
+sub setup {
+
+  my ($type, $choice, $fstart, $fstop, $limpts, $points);
+  my ($string, $node, $nodes, $deck, $uic);
+
+  if(! $circuit->{name}) {print "No active deck.\n"; return(1);}
+
+  print "Analysis type (l for list): ";
+  chomp($type = <>);
+  if ($type =~ /l/i) {
+    print "AC, TRAN\n";
+	print "Analysis type: ";
+	chomp($type = <>);
+	unless ($type =~ /ac|tran/i) {return(1);} 
+  }
+
+  if ($type =~ /ac/i) {
+
+    $type = ".AC";
+  
+    print "DEC, LIN, OCT: ";
+	chomp($choice = <>);
+	
+	if ($choice =~ /dec/i) {
+	  $type .= " DEC";
+	  print "Points per Decade: ";
+	  chomp($points = <>);
+	  translate(\$points);
+	  unless ($points > 0) {return(1);}
+
+      print "Starting Frequency: ";
+	  chomp($fstart = <>);
+	  translate(\$fstart);
+	  if ($fstart == 0) {$fstart = 1;}
+	  if ($fstart <= 0) {
+	    print "Starting frequency must be greater than 0.\n";
+	    return(1);
+	  }
+
+      print "Stop Frequency: ";
+	  chomp($fstop = <>);
+	  translate(\$fstop);
+	  unless ($fstop > $fstart) {
+	    print "Stop Freq must be larger than start freq.\n";
+	    return(1);
+	  }
+      
+	  $limpts = (cheap_log10($fstop) - cheap_log10($fstart)) * $points;
+	  $limpts += 50; # Give a little extra.
+	  
+	}
+	elsif ($choice =~ /oct/i) {
+	  $type .= " OCT";
+	  print "Points per Octave: ";
+	  chomp($points = <>);
+	  translate(\$points);
+	  unless ($points > 0) {return(1);}
+
+      print "Starting Frequency: ";
+	  chomp($fstart = <>);
+	  translate(\$fstart);
+	  if ($fstart == 0) {$fstart = 1;}
+	  if ($fstart <= 0) {
+	    print "Starting frequency must be greater than 0.\n";
+	    return(1);
+	  }
+
+      print "Stop Frequency: ";
+	  chomp($fstop = <>);
+	  translate(\$fstop);
+	  unless ($fstop > $fstart) {
+	    print "Stop Freq must be larger than start freq.\n";
+	    return(1);
+	  }
+
+	  $limpts = (cheap_log2($fstop) - cheap_log2($fstart)) * $points;
+	  $limpts += 50; # Give a little extra.
+
+	}
+	elsif ($choice =~ /lin/i) {
+	  $type .= " LIN";
+	  print "Number of points: ";
+      chomp($points = <>);
+	  translate(\$points);
+	  unless ($points > 0) {return(1);}
+
+      print "Starting Frequency: ";
+	  chomp($fstart = <>);
+	  translate(\$fstart);
+	  if ($fstart == 0) {$fstart = 1;}
+	  if ($fstart <= 0) {
+	    print "Starting frequency must be greater than 0.\n";
+	    return(1);
+ 	  }
+
+      print "Stop Frequency: ";
+	  chomp($fstop = <>);
+	  translate(\$fstop);
+	  unless ($fstop > $fstart) {
+	    print "Stop Freq must be larger than start freq.\n";
+	    return(1);
+ 	  }
+	  
+	  $limpts = $points + 5;
+	  
+	}
+	else {  # Didn't enter anything valid.
+	  print "You must enter DEC, LIN, or OCT for AC analysis.\n";
+	  return(1);
+	}
+    
+	$nodes = ".PRINT AC";
+    $string = "$type $points $fstart $fstop"; 
+    
+     
+  }
+  elsif (($type =~ /^tran$/i) || ($type =~ /(^tran uic$)/i)) {
+
+    if ($1) {$uic = 1;} # Just checking to see if uic was set.
+
+    $type = ".TRAN";
+
+    print "Start time: ";
+	chomp($tstart = <>);
+	translate(\$tstart);
+	if (! $tstart) {$tstart = 0;}
+
+	print "Stop time: ";
+	chomp($tstop = <>);
+	translate(\$tstop);
+	unless ($tstop > $tstart) {
+	  print "Stop time must be greater than start time.\n";
+	  return(1);
+	}
+
+	print "Number of points: ";
+	chomp($points = <>);
+	translate(\$points);
+	unless ($points > 1) {return(1);}
+
+	my $step_size = ($tstop - $tstart) / $points;
+	$limpts = ($tstop / $step_size) + 100;
+
+	# Here just want to have a way for the user to specify to use
+	# initial conditions.
+
+	if ($uic) {$string = "$type $step_size $tstop $tstart $step_size UIC";}
+    else {$string = "$type $step_size $tstop $tstart $step_size";}	
+    
+	$nodes = ".PRINT TRAN";
+  }
+
+  do { # Get the nodes from the user.
+	  
+    print "Enter node: ";
+    chomp($node = <>); 
+    if($node =~ /^\d/) { # Voltage by default.
+      $node = "v($node)";
+	  print "$node added\n";
+	  $nodes .= " $node";
+    }
+    elsif($node =~ /^([a-z]{1,3}\(.+\)$)/i) {
+      print "$node added\n";
+      $nodes .= " $node";
+    }
+    elsif($node =~ /^([a-z]{1,3}\d)/i) {
+      $node =~ s/^([a-z]{1,3})(\d+,?\d*)/$1\($2\)/i;
+      print "$node added\n";
+	  $nodes .= " $node";
+    }	  
+		
+  } while ($node);
+  
+
+  # At this point then the type of analysis is set up
+  # and we can change the deck around.
+
+  if (!($circuit->{deck} =~ s/limpts\s*=\s*\d*/limpts=$limpts/mgi)) {
+    $circuit->{deck} .= ".OPTIONS limpts=$limpts\n";
+  }
+  
+  $circuit->{deck} =~ s/(^\.ac.*)//mgi; 
+  $circuit->{deck} =~ s/(^\.op$)/.OP/mgi;
+  $circuit->{deck} =~ s/(^\.tran.*)//mgi;
+  $circuit->{deck} =~ s/(^\.print.*)//mgi;
+  $circuit->{deck} =~ s/(^\.plot.*)//mgi;
+  $circuit->{deck} =~ s/(^\.end$)//mgi;
+  $circuit->{deck} =~ s/(^\n)//mgi;
+
+  $circuit->{deck} .= "$string\n$nodes\n.END\n";
+
+  return(1);
+}
+
+
+#######################################################
+#                   translate
+#
+#  This is a sub that will take a number in the form
+# of 4u or 4m and put the proper multiplier on it for
+# us engineering types.
+#
+#######################################################
+sub translate {
+
+  $num = shift @_;
+
+  if (!($$num =~ /\d+[f|p|n|u|m|k|g|t]$/i)) {return(1);}
+
+  @num = split '', $$num;
+  $multiplier = pop @num;
+
+  if ($multiplier =~ /f/i) {$multiplier = 1e-15;}
+  elsif ($multiplier =~ /p/i) {$multiplier = 1e-12;}
+  elsif ($multiplier =~ /n/i) {$multiplier = 1e-9;}
+  elsif ($multiplier =~ /u/i) {$multiplier = 1e-6;}
+  elsif ($multiplier =~ /m/) {$multiplier = 1e-3;}
+  elsif ($multiplier =~ /k/i) {$multiplier = 1e+3;}
+  elsif ($multiplier =~ /M/) {$multiplier = 1e+6;}
+  elsif ($multiplier =~ /g/i) {$multiplier = 1e+9;}
+  elsif ($multiplier =~ /t/i) {$multiplier = 1e+12;}
+
+  $$num = join '', @num;
+  $$num = $$num * $multiplier;
+
+}
+
+######################################################
+#                    load
+#  This will check to make sure that the netlist is 
+# for real. If it is then the deck will be loaded into
+# a variable called deck in the $circuit structure.
+######################################################
+sub load {
+  
+  my @args = @_;
+  my $deck = @_[0];
+
+  if(!$args[0]) {print "Load what??\n"; return(1);}
+
+  undef $/;
+
+  if ($circuits->{$deck}) {
+    print "$deck is already loaded, use activate.\n";
+    return(1);
+  }
+
+  if (-r $deck) {
+    undef $circuit;
+    $circuit->{name} = $deck;
+    open deck, "< $deck" || die "Could not open $deck: $!\n";
+    $circuit->{deck} = <deck>;
+    if (defined $circuit->{deck}) {print "$circuit->{name} loaded.\n";}
+  }
+  else {
+    print "$deck does not exist or is not readable.\n";
+  }
+
+  # Now store the circuit in the hash.
+  $circuits->{$circuit->{name}} = $circuit;
+
+  $/ = "\n";
+}
+
+
+#####################################################
+#                cheap_log10
+#  Perl does not have a base10 log function by 
+# default so have to use this method. Any base log
+# can be found by using ln(arg)/ln(desired base).
+#  These two log functions are used to calculate the
+# number of points needed for the limpts parameter in
+# the spice deck.
+#
+#####################################################
+sub cheap_log10 {
+
+  my $val = shift @_;
+  $val = (log($val)/log(10));
+  use integer;
+  return($val);
+}
+
+
+#####################################################
+#                cheap_log2
+#  This is the same as above.
+#####################################################
+sub cheap_log2 {
+
+  my $val = shift @_;
+  $val = (log($val)/log(2));
+  use integer;
+  return($val);
+}
+
+
+
+#####################################################
+#           Show Decks
+#  As the name implies, this will show the decks
+# that the user has currently loaded into memory.
+#####################################################
+sub show_decks {
+  print "Currently loaded decks:\n";
+  foreach $deck (keys %{$circuits}) {
+  print "$deck ";
+  }
+  print "\n";
+  return(1);
+}
+
+
+######################################################
+#              Show deck
+#  This sub will show the current active deck. If it
+# is larger than one screen the output will be piped 
+# through the more command.
+#####################################################
+sub show_deck {
+
+  $MORE = new FileHandle;
+  $MORE->autoflush();
+
+  open $MORE, "| more" || die "Could not pipe to more: $!\n"; 
+  print $MORE "$circuit->{deck}";
+
+  close($MORE);
+  return(1);
+
+}
+
+
+
+######################################################
+#                    Activate
+#  This command will set the given argument as the
+# currently active deck.
+######################################################
+sub activate {
+
+  my @decks = keys %{$circuits};
+
+  if (! defined @_[0]) {  # Nothing passed in.
+    print "Currently loaded decks:\n@decks\n";
+  }
+  elsif($circuits->{@_[0]}) { # Argument passed.
+    $circuits->{$circuit->{name}} = $circuit;
+    undef $circuit;
+    $circuit = $circuits->{@_[0]}; 
+    return(1);
+  }
+  else { # Argument was not a loaded deck.
+    print "@_[0] is not loaded.\n"; 
+    print "Currently loaded decks:\n@decks\n";
+  }
+
+}
+
+
+#######################################################
+#                   simulate
+#       This will simulate the netlist.
+#  This works by opening up a pipe to the spice program.
+# Once the pipe is opened, the currently active deck is
+# read into the write end of the pipe. The write end 
+# is then closed to let spice know that nothing else 
+# be coming through the pipe. At this point spice will
+# start up and send its output to the read end of the
+# pipe. This is labeled with the FileHandle INPUT. 
+# As the spice output is being read there are multiple
+# regular expression searchel going on for the different
+# types of output. When it is found, it is placed in
+# the $circuit structure for storage.
+#
+#######################################################
+sub simulate {
+
+  open2(*INPUT, *WRITER, "spice");
+  print WRITER "$circuit->{deck}";
+  close(WRITER);
+  
+  my $i = 0;
+  my $j = 0;
+  my @values = [];
+  my $fields = 0;
+  my $nodes = 0;
+  my $ac = 0;
+  my $tran = 0;
+  
+
+  while (<INPUT>) {
+
+
+    # Looking for errors or warnings
+	# If there are any, they will be printed out
+	# for the user to see.
+	if (/^0warning:/ .. /^\n/) {
+	  print RED $_, RESET;
+	}
+	if (/^0\*error\*:/ .. /^\n/) {
+	  print RED $_, RESET unless ($_ =~ /\.end/);
+	}
+
+
+    # Looking for .AC, always begins with freq.
+    # $ac var just keeps tran values out of AC.
+    if (/^\s+freq/) {
+	  $circuit->{AC} = ();
+      $ac = 1;
+      @fields = split ' ', $_;
+      foreach (@fields) {tr/\(\)//d;}
+      $fields = scalar(@fields) - 1; # How many?
+      @{ $circuit->{AC}->{$parameters} } = @fields;
+    }
+    # Getting the AC values
+    if ((/^x{1}\n/ && $ac) ... /^y{1}\n/) {
+      if (/(\s\D?\d\W\d{3}\D{2}\d\d\s{1,}){2,}/) {
+        @values = split ' ', $_;
+        for($ac = 0; $ac <= $fields; $ac++) {
+          push (@{$circuit->{AC}->{$fields[$ac]}}, $values[$ac]); 
+        }
+      }
+    }
+
+
+
+    # Looking for Transient values here.
+    # $tran var keeps ac out of tran. 
+    if (/^\s+time/) {
+	  $circuit->{TRAN} = ();
+      $tran = 1;
+      @fields = split ' ', $_;
+      foreach (@fields) {tr/\(\)//d;}
+      $fields = scalar(@fields) - 1; # How many?
+      @{ $circuit->{TRAN}->{$parameters} } = @fields;
+    }
+    # Getting the TRAN values
+    if ((/^x{1}\n/ && $tran) ... (/^y{1}\n/)) {
+      if (/(\s\D?\d\W\d{3}\D{2}\d\d\s{1,}){2,}/) {
+        @values = split ' ', $_;
+        for($tran = 0; $tran <= $fields; $tran++) {
+          push (@{$circuit->{TRAN}->{$fields[$tran]}}, $values[$tran]); 
+        }
+      }
+    }
+
+
+
+    # Looking for Fourier output here.
+	# The fourier output will be converted into
+	# rms db. This way it will match a reading
+	# off of an oscilloscope. If voltage is desired
+	# make changes here.
+    if (/^\s{1}fourier components of transient response/ ... 
+	/^\s+total harmonic distortion/) {
+      if (/^\s{1}fourier components of transient response/) {
+        $four = 0;
+	    @tmp = split ' ',$_;
+	    ($parameter = pop @tmp) =~ tr/\(\)//d;
+		$parameter =~ s/v(\d+)/vdb$1/i; # Going to be in db's.
+	    push(@{$circuit->{FOUR}->{$parameters}}, $parameter);
+      } 
+      if (/^\s+\d+/) {
+	    @tmp = split ' ', $_;
+		if (scalar(@{ $circuit->{FOUR}->{$parameters} }) < 2) {
+		  push(@{ $circuit->{FOUR}->{freq} }, $tmp[1]);
+		}
+		push(@{ $circuit->{FOUR}->{$parameter} }, sprintf("%6.3f",20 * log($tmp[2])/log(10) - 3));
+      }
+      $four++;
+    }
+
+
+
+
+    # Looking for Bias (Node) Voltages.
+    if(/(\s+\(\s+\d+\)\s+\d\.\d+){1,}/) {
+      $i = 0; 
+      chop (@node = grep /\d\)/, split ' ', $_);
+      @voltage = grep /\d\.\d+/, split ' ', $_;
+	
+      while(@node[$i]) {
+        $circuit->{$dcnode}[$i+$nodes] = $voltage[$i];
+        $i++;
+      }
+      $nodes = scalar(@{$circuit->{$dcnode}});
+    }
+
+  }
+
+  $circuit->{num_nodes} = $nodes; 
+  $circuits->{$circuit->{name}} = $circuit;
+
+  # In these next three loops, the max and min points
+  # are found and stored. THis is used by the cursors to
+  # set the ends. This is necessary because octave does
+  # not have any means of giving the plot boundaries back 
+  # to the script, which would be ideal.
+
+  if ($ac) {
+    foreach $parameter (@{$circuit->{AC}->{$parameters}}) {
+	  $circuit->{AC}->{$parameter.max} = get_max(@{$circuit->{AC}->{$parameter}});
+	  $circuit->{AC}->{$parameter.min} = get_min(@{$circuit->{AC}->{$parameter}});
+    }
+  }
+  
+
+  if ($tran) {
+    foreach $parameter (@{$circuit->{TRAN}->{$parameters}}) {
+	  $circuit->{TRAN}->{$parameter.max} = get_max(@{$circuit->{TRAN}->{$parameter}});
+	  $circuit->{TRAN}->{$parameter.min} = get_min(@{$circuit->{TRAN}->{$parameter}});
+    }
+  }     
+  
+  if ($four) {
+    unshift @{ $circuit->{FOUR}->{$parameters} }, "freq";
+    foreach $parameter (@{$circuit->{FOUR}->{$parameters}}) {
+	  $circuit->{FOUR}->{$parameter.max} = get_max(@{$circuit->{FOUR}->{$parameter}});
+	  $circuit->{FOUR}->{$parameter.min} = get_min(@{$circuit->{FOUR}->{$parameter}});
+    } 
+  }
+	
+  
+  close(INPUT);
+  return(1);
+}
+
+
+#######################################################
+#        get_max
+#  This takes an array and gives back the maximum 
+# element.
+#######################################################
+sub get_max {
+
+  my @tmp = @_;
+  my $i = 0;
+  my $max = $tmp[0];
+
+  for($i = 1; $i < scalar(@tmp); $i++) {
+    if($tmp[$i] > $max) {$max = $tmp[$i];}
+  }
+
+  return($max);
+
+}
+
+#####################################################
+#         get_min
+#  This takes an array and gives back the minimum
+# element.
+#####################################################
+sub get_min {
+
+  my @tmp = @_;
+  my $i = 0;
+  my $min = $tmp[0];
+
+  for($i = 1; $i < scalar(@tmp); $i++) {
+    if($tmp[$i] < $min) {$min = $tmp[$i];}
+  }
+
+  return($min);
+
+
+}
+
+
+######################################################
+#                    show_ac
+#  This sub will print out the AC values for the user 
+# to see.
+######################################################
+sub show_ac {
+
+  my $fields = scalar($circuit->{AC}->{$parameters}) - 1;
+  my $key = $circuit->{AC}->{$parameters}[0];
+  my $i = 0;
+
+  # First make sure that AC was done.
+  if(! defined @{$circuit->{AC}->{$parameters}}) {
+    print "AC analysis has not been performed.\n";
+    return(1);
+  }
+
+  my $OUT = new FileHandle;
+  $OUT->autoflush();
+
+  open $OUT, "| more" || die "Can't pipe to more: $!\n";
+
+  foreach $array (@{ $circuit->{AC}->{$parameters} }) {
+    printf $OUT "%10s", $array;
+  }
+  print $OUT "\n";
+
+  while($circuit->{AC}->{$key}[$i]) {
+    foreach $array (@{ $circuit->{AC}->{$parameters} }) {
+      printf $OUT "%10.3f", $circuit->{AC}->{$array}[$i]; 
+    }
+    printf $OUT "\n";
+    $i++;
+  }
+
+  close($OUT);
+  return(1);
+
+}
+
+
+######################################################
+#                    show_tran
+#  THis sub will print out the transient values for 
+# the user to see.
+######################################################
+sub show_tran {
+
+  my $fields = scalar($circuit->{TRAN}->{$parameters}) - 1;
+  my $key = $circuit->{TRAN}->{$parameters}[0];
+  my $i = 0;
+
+  # First make sure that Transient was done.
+  if(! defined @{$circuit->{TRAN}->{$parameters}}) {
+    print "Transient analysis has not been performed.\n";
+    return(1);
+  }
+
+  my $OUT = new FileHandle;
+  $OUT->autoflush();
+  
+
+  open $OUT, "| more" || die "Can't pipe to less: $!\n";
+
+  foreach $array (@{ $circuit->{TRAN}->{$parameters} }) {
+    printf $OUT "%10s", $array;
+  }
+  print $OUT "\n";
+
+  while($circuit->{TRAN}->{$key}[$i]) {
+    foreach $array (@{ $circuit->{TRAN}->{$parameters} }) {
+      printf $OUT "%10.3f", $circuit->{TRAN}->{$array}[$i]; 
+    }
+    printf $OUT "\n";
+    $i++;
+  }
+
+  close(OUT);
+  return(1);
+}
+
+
+######################################################
+#                    show_four
+#  This sub will print out the fourier values for the
+# user to see.
+######################################################
+sub show_four {
+
+  my $fields = scalar($circuit->{FOUR}->{$parameters}) - 1;
+  my $key = $circuit->{FOUR}->{$parameters}[0];
+  my $i = 0;
+
+  # First make sure that Transient was done.
+  if(! defined @{$circuit->{FOUR}->{$parameters}}) {
+    print "Transient analysis has not been performed.\n";
+    return(1);
+  }
+
+  my $OUT = new FileHandle;
+  $OUT->autoflush();
+  
+
+  open $OUT, "| more" || die "Can't pipe to less: $!\n";
+
+  foreach $array (@{ $circuit->{FOUR}->{$parameters} }) {
+    printf $OUT "%10s", $array;
+  }
+  print $OUT "\n";
+
+  while($circuit->{FOUR}->{$key}[$i]) {
+    foreach $array (@{ $circuit->{FOUR}->{$parameters} }) {
+      printf $OUT "%10.3f", $circuit->{FOUR}->{$array}[$i]; 
+    }
+    printf $OUT "\n";
+    $i++;
+  }
+
+  close(OUT);
+  return(1);
+}
+
+
+
+########################################################
+#                   show_node
+#  This sub will print out the node voltages for the
+# user to see. The user can also specify a particular
+# node if they desire.
+#########################################################
+sub show_node {
+
+  my @args = @_;
+  my $i = 0;
+  my $nodes = $circuit->{num_nodes};
+
+  if(! defined $circuit->{$dcnode}) {
+    print "DC .OP not performed for $circuit->{name}.\n";
+    return(1);
+  }
+
+  if (scalar(@args)) {
+    if ($args[0] < 1 || $args[0] > $nodes) {
+      print "Invalid Node Number.\n"; 
+      print "There are $nodes nodes in this circuit.\n"; 
+      return(1);
+    }
+    foreach (@args) {
+      print "Node($_) = $circuit->{$dcnode}[$_-1] Volts\n";
+    }
+  }
+  else {
+    for ($i = 1; $i <= $nodes; $i++) {
+      print "Node($i) = $circuit->{$dcnode}[$i-1] Volts\n"; 
+    }
+  }
+}
+
+
+#########################################################
+#                     plot
+#  This subroutine will start up an interactive session
+# with the octave program. The user must specify ac, tran
+# or four for the plot type. The user may specify 
+# particular nodes to plot if there are many that were
+# analyzed. If none are specified, then all nodes are 
+# plotted.
+#
+#
+#
+#########################################################
+sub plot {
+
+  my($type, @fields) = @_;
+  my @tmp;
+  my $pid = 0;
+  my $i = 0;
+  my ($prompt, $time, @time, @args);
+  $arrow = 3; # This is here for a reason. It needs to be global
+              # and be defined up here so that the user can
+			  # go back and forth between plot, and cursors
+			  # and not get their marks nuked.
+
+  if ($type !~ /[ac|tran|four]/i) {
+    print "Must specify AC, Tran or Four.\n";
+	return(1);
+  }
+
+  $type = uc $type; #AC, TRAN and FOUR are all cap's.
+
+  if (! scalar(@{$circuit->{$type}->{$parameters}})) {
+    print "$type analysis has not been performed for $circuit->{name}.\n";
+    return(1);
+  }
+
+  # Now want to check that if specific nodes were specified that
+  # the simulation was done for them. If they weren't then the
+  # sub will return and let the user know.
+
+  if (scalar(@fields)) {
+    OUTER: foreach $request (@fields) {
+	         if ($request =~ /time|freq/i) {next OUTER;}
+	         foreach $parameter (@{$circuit->{$type}->{$parameters}}) {
+	           if($request =~ $parameter) {
+		         push(@tmp,$request);
+		         next OUTER;
+		       }
+	         }
+	         if ($tmp[-1] !~ $request) {
+               print "$request is not a valid parameter.\n";
+	         }
+	}
+    if(! scalar(@tmp)) {
+	  print "No valid requests found for $type plot.\n";
+	  return(1);
+	}
+	$fields[0] = $circuit->{$type}->{$parameters}[0]; # Time or Freq.
+	push(@fields,@tmp);
+  }
+  else { # There was nothing specified for parameters So we will plot all.
+    @fields = @{$circuit->{$type}->{$parameters}}; 
+  } 
+
+  # So if we are here, then there is data to plot.
+  # We will be plotting the parameters contained in
+  # the array @fields.
+
+  $OCTAVE = new FileHandle;
+  $OCTAVE->autoflush();
+
+  # Want to use the FileHandle module here for the 
+  # autoflush method. This ensures that octave will
+  # get the commands that it should get immediately.
+
+  # Any output other than errors from octave will be redirected
+  # to the /dev/null file.
+
+  $pid = open $OCTAVE, "| octave -q --interactive > /dev/null" || die "Could not open: $!\n";
+
+  # Need to read the data to octave.
+  # If the user did difference nodes such as 
+  # v(3,2), then need to trick octave. 
+  
+  foreach $parameter (@fields) {
+    if ($parameter =~ /[v|i][a-z]{0,2}\(\d+,\d+\)/i) {
+	  @tmp = @fields;
+	}
+    for($i = 0; $i < scalar(@{$circuit->{$type}->{$fields[0]}}); $i++) {
+      print $OCTAVE "$parameter($i+1)=$circuit->{$type}->{$parameter}[$i];\n";
+    }
+  }
+
+
+  if($#fields > 1) {print $OCTAVE "hold on;\n";}
+  for ($i = 1; $i <= $#fields; $i++) {
+    print $OCTAVE "plot ($fields[0],$fields[$i]);\n";
+  }
+
+  # Get some units. Leaving the units, and labels global so
+  # that they can be easily used elswhere. 
+  if ($type =~ /AC|FOUR/i) {$x_label = "Frequency(Hz)"; $x_units = "Hz";}
+  elsif ($type =~ /TRAN/i) {$x_label = "Time(sec)"; $x_units = "S";}
+  $y_label = $fields[1];
+  for ($i = 2; $i <= $#fields; $i++) {$y_label .= ", $fields[$i]";}
+
+  # Set log x for Decade plots.
+  if (grep(/\.AC DEC/, $circuit->{deck})) {
+    print $OCTAVE "gset logscale x;\n";
+	$logscale = 1;
+  }
+
+  print $OCTAVE "gset title \'$type Response\';\n";
+  print $OCTAVE "gset xlabel \"$x_label\";\n";
+  print $OCTAVE "gset ylabel \"$y_label\";\n";
+  print $OCTAVE "gset nokey;\n";
+  print $OCTAVE "replot;\n";
+
+  do { # Sit here until the user exits.
+  
+    @time = split ' ', scalar localtime;
+    $time = @time[3];
+  
+	$prompt = "$time plot $type--> ";
+
+    $command = $term->readline($prompt);
+	$term->addhistory($command) if /\S/; 
+
+    @args = split ' ', $command;
+    $command = shift @args; 
+
+    if ($command =~ /^gset/i) {print $OCTAVE "gset @args\n";}
+	elsif ($command =~ /replot/i) {print $OCTAVE "replot\n";}
+	elsif ($command =~ /cursors/i) {cursors($type, @fields);}
+	elsif ($command =~ /save/i) {save_plot();}
+	elsif ($command =~ /help/i) {plot_help(@args);}
+
+
+
+  } while($command !~ /quit|exit/);
+  
+  kill 9, $pid;
+  close($OCTAVE);
+
+}
+
+
+########################################################
+#                 Cursors
+#  This is by far the hairiest part of this script.
+# This will be the first part re-written in future 
+# versions so I don't want to say too much about this
+# now. 
+########################################################
+sub cursors {
+
+  my ($type, @fields) = @_;
+  my $key = 0; 
+  my $i = 0;
+  my $x = 0;
+  my $y = 0;
+  my $toggle = 1;
+  my ($max_x, $min_x, $max_y, $min_y);
+
+  my $max_i = scalar(@{$circuit->{$type}->{$fields[0]}}) - 1;
+
+  $max_x = $circuit->{$type}->{$fields[0].max};
+  $min_x = $circuit->{$type}->{$fields[0].min};
+  $max_y = $circuit->{$type}->{$fields[1].max};
+  $min_y = $circuit->{$type}->{$fields[1].min};
+
+  if ($fields[$toggle] =~ /^[v|i]\d+/i) {$y_units = "V";}
+  elsif ($fields[$toggle] =~ /^[v|i]p\d+/i) {$y_units = "deg";}
+  elsif ($fields[$toggle] =~ /^[v|i]db\d+/i) {$y_units = "db";}
+  
+  ReadMode 'raw';
+
+  $x = $circuit->{$type}->{$fields[0]}[$i];
+  $y = $circuit->{$type}->{$fields[$toggle]}[$i];
+  print $OCTAVE "gset arrow 1 from $x,$min_y to $x,$max_y nohead;\n";
+  print $OCTAVE "gset arrow 2 from $min_x,$y to $max_x,$y nohead;\n";
+  print $OCTAVE "gset title \'($x$x_units,$y$y_units)\';\n";
+  print $OCTAVE "replot;\n";
+  
+  do {
+    
+    $key = ReadKey(0);	
+	 
+	if (($key =~ '8') || ($key =~ '6')) {
+	  $i+=1;
+      if ($i > $max_i) {$i = 0;}
+      $x = $circuit->{$type}->{$fields[0]}[$i];
+      $y = $circuit->{$type}->{$fields[$toggle]}[$i];
+      print $OCTAVE "gset noarrow 1;\n";
+	  print $OCTAVE "gset noarrow 2;\n";
+	  print $OCTAVE "gset arrow 1 from $x,$min_y to $x,$max_y nohead;\n";
+	  print $OCTAVE "gset arrow 2 from $min_x,$y to $max_x,$y nohead;\n";
+      print $OCTAVE "gset title \'($x$x_units,$y$y_units)\';\n";
+	  print $OCTAVE "replot;\n";
+	}
+    elsif (($key =~ '2') || ($key =~ '4')) {
+	  $i-=1;
+	  if ($i < 0) {$i = $max_i;} 
+      $x = $circuit->{$type}->{$fields[0]}[$i];
+      $y = $circuit->{$type}->{$fields[$toggle]}[$i];
+      print $OCTAVE "gset noarrow 1;\n";
+	  print $OCTAVE "gset noarrow 2;\n";
+	  print $OCTAVE "gset arrow 1 from $x,$min_y to $x,$max_y nohead;\n";
+	  print $OCTAVE "gset arrow 2 from $min_x,$y to $max_x,$y nohead;\n";
+      print $OCTAVE "gset title \'($x$x_units,$y$y_units)\';\n";
+	  print $OCTAVE "replot;\n";
+	}
+	elsif ($key =~ 'n') {
+      $toggle++;
+	  if ($toggle > $#fields) {$toggle = 1;}
+      if ($fields[$toggle] =~ /^[v|i]\d+/i) {$y_units = "V";}
+	  elsif ($fields[$toggle] =~ /^[v|i]p\d+/i) {$y_units = "deg";}
+	  elsif ($fields[$toggle] =~ /^[v|i]db\d+/i) {$y_units = "db";}
+      $max_y = $circuit->{$type}->{$fields[$toggle].max};
+	  $min_y = $circuit->{$type}->{$fields[$toggle].min};
+      $y = $circuit->{$type}->{$fields[$toggle]}[$i];
+      print $OCTAVE "gset noarrow 1;\n";
+	  print $OCTAVE "gset noarrow 2;\n";
+	  print $OCTAVE "gset arrow 1 from $x,$min_y to $x,$max_y nohead;\n";
+	  print $OCTAVE "gset arrow 2 from $min_x,$y to $max_x,$y nohead;\n";
+      print $OCTAVE "gset title \'($x$x_units,$y$y_units)\';\n";
+	  print $OCTAVE "replot;\n";
+	}
+	elsif ($key =~ '5') {
+	  use integer;
+      $i = $max_i/2;
+      $x = $circuit->{$type}->{$fields[0]}[$i];
+      $y = $circuit->{$type}->{$fields[$toggle]}[$i];
+      print $OCTAVE "gset noarrow 1;\n";
+	  print $OCTAVE "gset noarrow 2;\n";
+	  print $OCTAVE "gset arrow 1 from $x,$min_y to $x,$max_y nohead;\n";
+	  print $OCTAVE "gset arrow 2 from $min_x,$y to $max_x,$y nohead;\n";
+      print $OCTAVE "gset title \'($x$x_units,$y$y_units)\';\n";
+	  print $OCTAVE "replot;\n"; 
+	}
+	elsif ($key =~ 'm') { # Label some points.
+	
+	  my $key = 0; # Need to use this here. 
+	  my $from_x = 0;
+	  my $from_y = 0;
+	  my $label_x = 0;
+	  my $label_y = 0;
+	  my $i = 0;
+	  my $angle = 0;
+	  my @angle = qw(0 .393 .785 1.18 1.57 1.96 2.36 2.75 
+	                 3.14 3.54 3.93 4.32 4.71 5.1 5.5 5.89); 
+	  my $multiplier = .1; # This is the scaling multiplier for
+	                       # the arrow length.
+
+      my ($x_arrow_length, $y_arrow_length);
+
+						   
+      # Need to find out the plot boundaries to calculate 
+	  # appropriate default arrow lengths.
+	  
+      if ($#fields > 1) {
+        for($i = 1; $i <= $#fields; $i++) { 
+          if ($max_y < $circuit->{$type}->{$fields[$i].max}) {
+	        $max_y = $circuit->{$type}->{$fields[$i].max};
+	      }
+	      if ($min_y > $circuit->{$type}->{$fields[$i].min}) {
+	        $min_y = $circuit->{$type}->{$fields[$i].min};
+	      }
+        }
+        $i = 0;
+      } 
+
+	  if ($logscale) {
+	    $x_arrow_length = 10**((log($x)/log(10)) + .5);
+	  }
+	  else {
+        $x_arrow_length = $multiplier * ($max_x - $min_x);  
+	  }
+	  $y_arrow_length = $multiplier * ($max_y - $min_y);
+
+      # $from_x and $from_y are used for the point that
+	  # the arrow comes from.
+
+      $from_x = $x + $x_arrow_length * cos($angle[$angle]);
+      $from_y = $y + $y_arrow_length * sin($angle[$angle]);
+	  
+      # $x_label_space and $y_label_space are calculated
+	  # here off of the plot boundaries. 1% is an acceptable
+	  # value for this spacing. Note that these are only
+	  # calculated once. Initialy tried to calculate these
+	  # using the arrow length, but since it changes, the space
+	  # was changing correspndingly and this was no good.
+
+	  
+      $x_label_space = ($max_x - $min_x) * .01;
+	  $y_label_space = ($max_y - $min_y) * .025;
+
+      if ($logscale) {$label_x = $from_x;}
+	  else {$label_x = $from_x + $x_label_space;}
+	  $label_y = $from_y;
+
+	  print $OCTAVE "gset noarrow 1;\n";
+	  print $OCTAVE "gset noarrow 2;\n";
+
+      print $OCTAVE "gset arrow $arrow from $from_x,$from_y to $x,$y;\n"; 
+	  print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y l;\n";
+      print $OCTAVE "replot;\n";
+
+      do {
+	  
+        $key = ReadKey(0); 
+		
+        if ($key =~ 'r') { # Want to rotate the arrow.
+		  $angle++;
+
+		  if ($angle > $#angle) {$angle = 0;}
+		  
+		  if (($logscale) && (($angle > 4) && ($angle < 12))) {
+		    $x_arrow_length = 10**((log($x)/log(10))-.2);
+		    $from_x = $x + $x_arrow_length * cos($angle[$angle]); 
+		  }
+		  else {
+            $from_x = $x + $x_arrow_length * cos($angle[$angle]);
+		  }
+          $from_y = $y + $y_arrow_length * sin($angle[$angle]);
+		  print $OCTAVE "gset noarrow $arrow;\n";
+		  print $OCTAVE "gset nolabel $arrow;\n";
+          print $OCTAVE "gset arrow $arrow from $from_x,$from_y to $x,$y;\n"; 
+		  
+		  ## This block is just to get the label in the right place.
+		  if ((($angle >= 0) && ($angle <=  3)) || (($angle >= 13) && ($angle <= 15))) {
+		    if ($logscale) {$label_x = $from_x;}
+		    else{$label_x = $x_label_space + $from_x;}
+		    $label_y = $from_y;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y l;\n";  
+		  }
+		  elsif (($angle > 4) && ($angle < 12)) {
+		    if($logscale) {$label_x = $from_x;}
+		    else{$label_x = $from_x - $x_label_space;}
+		    $label_y = $from_y;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y r;\n";
+		  }
+		  elsif($angle == 4) {
+            $label_x = $from_x;
+		    $label_y = $from_y + $y_label_space;
+            print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y c;\n";
+		  }
+		  elsif($angle == 12) {
+            $label_x = $from_x;
+		    $label_y = $from_y - $y_label_space;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x, $label_y c;\n";
+		  }
+		  # End of label computation block. Repeated in each below.
+        }
+		elsif ($key =~ 'l') { # Want to lengthen the arrow.
+		  $x_arrow_length = $x_arrow_length * 1.1;
+		  $y_arrow_length = $y_arrow_length * 1.1;
+          $from_x = $x + $x_arrow_length * cos($angle[$angle]);
+          $from_y = $y + $y_arrow_length * sin($angle[$angle]);
+          print $OCTAVE "gset noarrow $arrow;\n";
+		  print $OCTAVE "gset nolabel $arrow;\n";
+          print $OCTAVE "gset arrow $arrow from $from_x,$from_y to $x,$y;\n"; 
+		  
+		  if ((($angle >= 0) && ($angle <=  3)) || (($angle >= 13) && ($angle <= 15))) {
+		    if ($logscale) {$label_x = $from_x;}
+		    else{$label_x = $x_label_space + $from_x;}
+		    $label_y = $from_y;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y l;\n";  
+		  }
+		  elsif (($angle > 4) && ($angle < 12)) {
+		    if($logscale) {$label_x = $from_x;}
+		    else{$label_x = $from_x - $x_label_space;}
+		    $label_y = $from_y;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y r;\n";
+		  }
+		  elsif($angle == 4) {
+            $label_x = $from_x;
+		    $label_y = $from_y + $y_label_space;
+            print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y c;\n";
+		  }
+		  elsif($angle == 12) {
+            $label_x = $from_x;
+		    $label_y = $from_y - $y_label_space;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x, $label_y c;\n";
+		  }
+        }
+		elsif ($key =~ 's') { # Want to shorten the arrow.
+		  $x_arrow_length = $x_arrow_length * .95;
+		  $y_arrow_length = $y_arrow_length * .95;
+          $from_x = $x + $x_arrow_length * cos($angle[$angle]);
+          $from_y = $y + $y_arrow_length * sin($angle[$angle]);
+          print $OCTAVE "gset noarrow $arrow;\n";
+		  print $OCTAVE "gset nolabel $arrow;\n";
+          print $OCTAVE "gset arrow $arrow from $from_x,$from_y to $x,$y;\n"; 
+		  
+		  if ((($angle >= 0) && ($angle <=  3)) || (($angle >= 13) && ($angle <= 15))) {
+		    if ($logscale) {$label_x = $from_x;}
+		    else{$label_x = $x_label_space + $from_x;}
+		    $label_y = $from_y;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y l;\n";  
+		  }
+		  elsif (($angle > 4) && ($angle < 12)) {
+		    if($logscale) {$label_x = $from_x;}
+		    else{$label_x = $from_x - $x_label_space;}
+		    $label_y = $from_y;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y r;\n";
+		  }
+		  elsif($angle == 4) {
+            $label_x = $from_x;
+		    $label_y = $from_y + $y_label_space;
+            print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y c;\n";
+	 	  }
+		  elsif($angle == 12) {
+            $label_x = $from_x;
+		    $label_y = $from_y - $y_label_space;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x, $label_y c;\n";
+		  }
+        }    
+		elsif ($key =~ 'i') { # Increase the label spacing
+          $x_label_space *= 1.05;
+		  $y_label_space *= 1.05;
+          
+          print $OCTAVE "gset noarrow $arrow;\n";
+		  print $OCTAVE "gset nolabel $arrow;\n";
+          print $OCTAVE "gset arrow $arrow from $from_x,$from_y to $x,$y;\n"; 
+		  
+		  if ((($angle >= 0) && ($angle <=  3)) || (($angle >= 13) && ($angle <= 15))) {
+		    if ($logscale) {$label_x = $from_x;}
+		    else{$label_x = $x_label_space + $from_x;}
+		    $label_y = $from_y;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y l;\n";  
+		  }
+		  elsif (($angle > 4) && ($angle < 12)) {
+		    if($logscale) {$label_x = $from_x;}
+		    else{$label_x = $from_x - $x_label_space;}
+		    $label_y = $from_y;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y r;\n";
+	 	  }
+		  elsif($angle == 4) {
+            $label_x = $from_x;
+		    $label_y = $from_y + $y_label_space;
+            print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y c;\n";
+		  }
+		  elsif($angle == 12) {
+            $label_x = $from_x;
+		    $label_y = $from_y - $y_label_space;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x, $label_y c;\n";
+		  }
+          
+		}
+		elsif ($key =~ 'd') { # Decrease the label spacing
+          $x_label_space *= .95;
+		  $y_label_space *= .95;
+
+          print $OCTAVE "gset noarrow $arrow;\n";
+		  print $OCTAVE "gset nolabel $arrow;\n";
+          print $OCTAVE "gset arrow $arrow from $from_x,$from_y to $x,$y;\n"; 
+		  
+		  if ((($angle >= 0) && ($angle <=  3)) || (($angle >= 13) && ($angle <= 15))) {
+		    if ($logscale) {$label_x = $from_x;}
+		    else{$label_x = $x_label_space + $from_x;}
+		    $label_y = $from_y;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y l;\n";  
+		  }
+		  elsif (($angle > 4) && ($angle < 12)) {
+		    if($logscale) {$label_x = $from_x;}
+		    else{$label_x = $from_x - $x_label_space;}
+		    $label_y = $from_y;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y r;\n";
+		  }
+		  elsif($angle == 4) {
+            $label_x = $from_x;
+		    $label_y = $from_y + $y_label_space;
+            print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x,$label_y c;\n";
+		  }
+		  elsif($angle == 12) {
+            $label_x = $from_x;
+		    $label_y = $from_y - $y_label_space;
+		    print $OCTAVE "gset label $arrow \'($x$x_units, $y$y_units)\' at $label_x, $label_y c;\n";
+		  }
+           
+		}
+        
+        print $OCTAVE "replot;\n";
+
+      } while ($key !~ 'q');
+      
+      print $OCTAVE "gset arrow 1 from $x,$min_y to $x,$max_y nohead;\n";
+	  print $OCTAVE "gset arrow 2 from $min_x,$y to $max_x,$y nohead;\n";
+	  print $OCTAVE "replot;\n";
+	  $arrow++;
+           
+	} ## This is the end of $key = `m`
+
+	elsif (($key =~ 'd') && ($arrow > 3)) { # Want to delete arrows.
+      $arrow--;
+	  print $OCTAVE "gset noarrow $arrow;\n";
+      print $OCTAVE "gset nolabel $arrow;\n";
+      print $OCTAVE "replot;\n";
+	}
+
+
+  } while ($key !~ /q/);
+
+  ReadMode 'restore';
+
+  # Put things back into plot mode.
+
+  print $OCTAVE "gset title \'$type Response\';\n";
+  print $OCTAVE "gset noarrow 1;\n";
+  print $OCTAVE "gset noarrow 2;\n";
+  print $OCTAVE "replot;\n";
+  
+  return(1);
+
+}
+
+##############################################
+#        save_plot
+#  This will save the plot to a file.
+##############################################
+sub save_plot {
+
+  my $plot;
+  print "Save as: ";
+  chomp($plot = <>);
+
+  print $OCTAVE "gset terminal png;\n";
+  print $OCTAVE "gset output \'$plot.png\';\n";
+  print $OCTAVE "gset size 1,.7;\n";
+  print $OCTAVE "replot;\n";
+  print $OCTAVE "gset output;\n";
+  print $OCTAVE "gset terminal x11;\n";
+  print $OCTAVE "gset size 1,1;\n";
+}
+
+
+###################################################
+#               plot_help 
+#  Prints out some very basic help for the plot
+# mode of the script.
+####################################################
+sub plot_help {
+
+  my $arg = shift @_;
+
+  my %help => {
+            gset => "",  
+            cursors => "",
+			replot => "",
+            save => "",
+            };
+
+  $help{gset} = "gset <plot options>, see octave help.\n";
+  $help{cursors} ="activate cursors, use 4,8,6,2 to move, m = mark, l = lengthen, s = shorten,
+			r = rotate, q = exit.\n";
+  $help{replot} = "replot the plot after changes.\n";
+  $help{save} = "save the plot to file.\n"; 
+
+  if ($arg) {
+    print "$help{$arg}\n";
+  }
+  else {
+    foreach $command (keys %help) {
+      print "$command\n";
+    }
+  }
+
+  return(1);
+}
